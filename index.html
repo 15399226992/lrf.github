@@ -1,0 +1,400 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<title>安全监测系统（最终版）</title>
+
+<script src="https://unpkg.com/mqtt/dist/mqtt.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+
+<style>
+body {
+    background:#0b1a2a;
+    color:white;
+    font-family:Arial;
+    padding:20px;
+}
+h1 {
+    text-align:center;
+}
+.container {
+    display:grid;
+    grid-template-columns:1fr 1fr;
+    gap:20px;
+}
+.card {
+    background:#10263b;
+    padding:15px;
+    border-radius:10px;
+}
+canvas {
+    background:#081521;
+    border-radius:10px;
+}
+.alert {
+    color:red;
+    font-weight:bold;
+    animation:blink 1s infinite;
+}
+@keyframes blink {
+    50% { opacity:0.3; }
+}
+button {
+    padding:10px;
+    margin:5px;
+    border:none;
+    border-radius:6px;
+    cursor:pointer;
+}
+.info {
+    margin-bottom:10px;
+    font-size:16px;
+}
+.status-ok {
+    color:lightgreen;
+}
+.status-warn {
+    color:orange;
+}
+.status-off {
+    color:#ff6b6b;
+}
+</style>
+</head>
+
+<body>
+
+<h1>智能安全监测系统</h1>
+
+<div id="alarmText" class="info">状态正常</div>
+<div id="postureText" class="info">姿态：--</div>
+<div id="dataStatusText" class="info">数据状态：--</div>
+
+<div class="info">
+    报警总开关：
+    <input type="checkbox" id="systemSwitch">
+    <span id="systemSwitchText" class="status-off">关闭</span>
+</div>
+
+<div class="container">
+    <div class="card">
+        <h3>心率</h3>
+        <canvas id="hrChart"></canvas>
+    </div>
+
+    <div class="card">
+        <h3>血氧</h3>
+        <canvas id="spo2Chart"></canvas>
+    </div>
+</div>
+
+<div style="margin-top:20px;">
+    <button onclick="manualAlarm()">手动报警</button>
+    <a href="history.html"><button>查看历史数据</button></a>
+</div>
+
+<script>
+const client = mqtt.connect("wss://broker.emqx.io:8084/mqtt");
+
+/* ================= 全局状态 ================= */
+let alarmActive = false;
+let normalStartTime = null;
+let systemEnabled = false;
+
+const RECOVER_TIME = 5000;
+const POSTURE_DELAY = 2000;
+
+let postureAbnormal = false;
+let postureAbnormalStart = null;
+
+let lastHR = 0;
+let lastSpO2 = 0;
+
+/* ================= 总开关 ================= */
+const systemSwitch = document.getElementById("systemSwitch");
+const systemSwitchText = document.getElementById("systemSwitchText");
+
+function updateSwitchUI() {
+    systemSwitch.checked = systemEnabled;
+    systemSwitchText.innerText = systemEnabled ? "开启" : "关闭";
+    systemSwitchText.className = systemEnabled ? "status-ok" : "status-off";
+}
+
+updateSwitchUI();
+
+systemSwitch.addEventListener("change", function () {
+    systemEnabled = this.checked;
+    updateSwitchUI();
+
+    if (!systemEnabled && alarmActive) {
+        clearAlarm();
+    }
+});
+
+/* ================= 图表 ================= */
+const hrChart = new Chart(document.getElementById("hrChart"), {
+    type: 'line',
+    data: {
+        labels: [],
+        datasets: [{
+            label: 'HR',
+            data: [],
+            tension: 0.3,
+            borderWidth: 2
+        }]
+    },
+    options: {
+        responsive: true,
+        animation: false
+    }
+});
+
+const spo2Chart = new Chart(document.getElementById("spo2Chart"), {
+    type: 'line',
+    data: {
+        labels: [],
+        datasets: [{
+            label: 'SpO2',
+            data: [],
+            tension: 0.3,
+            borderWidth: 2
+        }]
+    },
+    options: {
+        responsive: true,
+        animation: false
+    }
+});
+
+/* ================= MQTT ================= */
+client.on("connect", () => {
+    console.log("MQTT connected");
+    client.subscribe("factory/health");
+});
+
+client.on("message", (topic, message) => {
+    const msg = message.toString();
+    console.log("收到:", msg);
+
+    if (msg.startsWith("$HEALTH")) {
+        const arr = msg.replace("#", "").split(",");
+
+        const hr = parseInt(arr[1], 10);
+        const spo2 = parseInt(arr[2], 10);
+        const fingerOn = parseInt(arr[3], 10);
+        const valid = parseInt(arr[4], 10);
+
+        lastHR = hr;
+        lastSpO2 = spo2;
+
+        updateDataStatus(hr, spo2, fingerOn, valid);
+
+        // 只有佩戴且数据有效时，才更新图表和保存历史
+        if (fingerOn === 1 && valid === 1) {
+            updateChart(hrChart, hr);
+            updateChart(spo2Chart, spo2);
+            saveHistory(hr, spo2);
+        }
+
+        checkAlarm(hr, spo2, valid, fingerOn);
+    }
+
+    if (msg.startsWith("$POSTURE")) {
+        const arr = msg.replace("#", "").split(",");
+
+        const state = parseInt(arr[1], 10);
+        const abnormal = parseInt(arr[2], 10);
+        const roll = parseFloat(arr[3]);
+        const pitch = parseFloat(arr[4]);
+        const yaw = parseFloat(arr[5]);
+
+        showPosture(state, abnormal, roll, pitch, yaw);
+        handlePosture(abnormal);
+
+        checkAlarm(lastHR, lastSpO2, 1, 1);
+    }
+});
+
+/* ================= 数据状态显示 ================= */
+function updateDataStatus(hr, spo2, fingerOn, valid) {
+    const el = document.getElementById("dataStatusText");
+
+    if (fingerOn === 0) {
+        el.innerHTML = "数据状态：未佩戴";
+        el.className = "info status-off";
+    } else if (valid === 0) {
+        el.innerHTML = "数据状态：数据无效";
+        el.className = "info status-warn";
+    } else if (hr > 0 && spo2 > 0) {
+        el.innerHTML = "数据状态：正常采集";
+        el.className = "info status-ok";
+    } else {
+        el.innerHTML = "数据状态：等待稳定";
+        el.className = "info status-warn";
+    }
+}
+
+/* ================= 姿态显示 ================= */
+function showPosture(state, abnormal, roll, pitch, yaw) {
+    let stateText = "正常";
+
+    switch (state) {
+        case 0: stateText = "正常"; break;
+        case 1: stateText = "前倾"; break;
+        case 2: stateText = "后仰"; break;
+        case 3: stateText = "左倾"; break;
+        case 4: stateText = "右倾"; break;
+        case 5: stateText = "异常"; break;
+        default: stateText = "未知"; break;
+    }
+
+    document.getElementById("postureText").innerHTML =
+        "姿态：" + stateText +
+        " | A:" + abnormal +
+        " | R:" + roll.toFixed(1) +
+        " P:" + pitch.toFixed(1) +
+        " Y:" + yaw.toFixed(1);
+}
+
+/* ================= 姿态防抖 ================= */
+function handlePosture(abnormal) {
+    if (abnormal === 1) {
+        if (!postureAbnormalStart) {
+            postureAbnormalStart = Date.now();
+        }
+
+        if (Date.now() - postureAbnormalStart >= POSTURE_DELAY) {
+            postureAbnormal = true;
+        }
+    } else {
+        postureAbnormalStart = null;
+        postureAbnormal = false;
+    }
+}
+
+/* ================= 图表更新 ================= */
+function updateChart(chart, value) {
+    chart.data.labels.push("");
+    chart.data.datasets[0].data.push(value);
+
+    if (chart.data.labels.length > 20) {
+        chart.data.labels.shift();
+        chart.data.datasets[0].data.shift();
+    }
+
+    chart.update();
+}
+
+/* ================= 本地历史 ================= */
+function saveHistory(hr, spo2) {
+    if (hr <= 0 || spo2 <= 0) return;
+
+    let history = JSON.parse(localStorage.getItem("history") || "[]");
+
+    history.push({
+        time: new Date().toLocaleTimeString(),
+        hr: hr,
+        spo2: spo2
+    });
+
+    if (history.length > 200) {
+        history.shift();
+    }
+
+    localStorage.setItem("history", JSON.stringify(history));
+}
+
+function saveAlarm(reason) {
+    let alarms = JSON.parse(localStorage.getItem("alarms") || "[]");
+
+    alarms.push({
+        time: new Date().toLocaleTimeString(),
+        type: reason
+    });
+
+    if (alarms.length > 100) {
+        alarms.shift();
+    }
+
+    localStorage.setItem("alarms", JSON.stringify(alarms));
+}
+
+/* ================= 手动报警 ================= */
+function manualAlarm() {
+    if (!systemEnabled) return;
+
+    alarmActive = true;
+    document.getElementById("alarmText").innerHTML = "⚠ 手动报警";
+    document.getElementById("alarmText").className = "info alert";
+    sendCmd("ALARM_ON");
+}
+
+/* ================= 报警逻辑 ================= */
+function checkAlarm(hr, spo2, valid, fingerOn) {
+    if (!systemEnabled) return;
+
+    if (valid === 0 || fingerOn === 0) {
+        handleRecovery();
+        return;
+    }
+
+    let abnormal = false;
+    let reason = "";
+
+    if (hr > 170 || hr < 50) {
+        abnormal = true;
+        reason = "心率异常";
+    } else if (spo2 < 92) {
+        abnormal = true;
+        reason = "血氧过低";
+    } else if (postureAbnormal) {
+        abnormal = true;
+        reason = "姿态异常";
+    }
+
+    if (abnormal) {
+        normalStartTime = null;
+        triggerAlarm(reason);
+    } else {
+        handleRecovery();
+    }
+}
+
+function triggerAlarm(reason) {
+    if (!alarmActive) {
+        alarmActive = true;
+        document.getElementById("alarmText").innerHTML = "⚠ " + reason;
+        document.getElementById("alarmText").className = "info alert";
+        saveAlarm(reason);
+        sendCmd("ALARM_ON");
+    }
+}
+
+function handleRecovery() {
+    if (!alarmActive) return;
+
+    if (!normalStartTime) {
+        normalStartTime = Date.now();
+    }
+
+    if (Date.now() - normalStartTime >= RECOVER_TIME) {
+        clearAlarm();
+        normalStartTime = null;
+    }
+}
+
+function clearAlarm() {
+    alarmActive = false;
+    document.getElementById("alarmText").innerHTML = "状态正常";
+    document.getElementById("alarmText").className = "info";
+    sendCmd("ALARM_OFF");
+}
+
+/* ================= 下发控制命令 ================= */
+function sendCmd(cmd) {
+    client.publish("factory/cmd", "$CMD," + cmd);
+}
+</script>
+
+</body>
+</html>

@@ -1,0 +1,150 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<title>历史数据</title>
+<style>
+body {
+    background:#0b1a2a;
+    color:white;
+    font-family:Arial;
+    padding:20px;
+}
+h1 {
+    text-align:center;
+}
+.card {
+    background:#10263b;
+    padding:15px;
+    border-radius:10px;
+    margin-bottom:20px;
+}
+button {
+    padding:10px 14px;
+    margin-right:10px;
+    border:none;
+    border-radius:6px;
+    cursor:pointer;
+}
+table {
+    width:100%;
+    border-collapse:collapse;
+    margin-top:10px;
+    background:#081521;
+    border-radius:8px;
+    overflow:hidden;
+}
+th, td {
+    border:1px solid #1d3a57;
+    padding:10px;
+    text-align:center;
+}
+th {
+    background:#16324b;
+}
+.summary {
+    margin:8px 0;
+    font-size:16px;
+}
+.empty {
+    color:#ffb86c;
+    text-align:center;
+    margin-top:20px;
+}
+a {
+    text-decoration:none;
+}
+</style>
+</head>
+
+<body>
+
+<h1>历史数据记录</h1>
+
+<div class="card">
+    <div class="summary" id="countText">有效记录数：0</div>
+    <div class="summary" id="avgHrText">平均心率：0 bpm</div>
+    <div class="summary" id="avgSpo2Text">平均血氧：0 %</div>
+
+    <div style="margin-top:15px;">
+        <button onclick="clearHistory()">清空历史</button>
+        <a href="index.html"><button>返回主页</button></a>
+    </div>
+</div>
+
+<div class="card">
+    <table id="historyTable">
+        <thead>
+            <tr>
+                <th>序号</th>
+                <th>时间</th>
+                <th>心率(bpm)</th>
+                <th>血氧(%)</th>
+            </tr>
+        </thead>
+        <tbody id="historyBody"></tbody>
+    </table>
+
+    <div id="emptyText" class="empty" style="display:none;">暂无有效历史数据</div>
+</div>
+
+<script>
+function loadHistory() {
+    let history = JSON.parse(localStorage.getItem("history") || "[]");
+
+    // 再过滤一次，确保只显示有效数据
+    history = history.filter(item => item.hr > 0 && item.spo2 > 0);
+
+    const tbody = document.getElementById("historyBody");
+    const emptyText = document.getElementById("emptyText");
+
+    tbody.innerHTML = "";
+
+    if (history.length === 0) {
+        document.getElementById("countText").innerText = "有效记录数：0";
+        document.getElementById("avgHrText").innerText = "平均心率：0 bpm";
+        document.getElementById("avgSpo2Text").innerText = "平均血氧：0 %";
+        emptyText.style.display = "block";
+        return;
+    }
+
+    emptyText.style.display = "none";
+
+    let hrSum = 0;
+    let spo2Sum = 0;
+
+    // 最新数据显示在前面
+    const reversedHistory = history.slice().reverse();
+
+    reversedHistory.forEach((item, index) => {
+        hrSum += item.hr;
+        spo2Sum += item.spo2;
+
+        const row = document.createElement("tr");
+        row.innerHTML = `
+            <td>${index + 1}</td>
+            <td>${item.time}</td>
+            <td>${item.hr}</td>
+            <td>${item.spo2}</td>
+        `;
+        tbody.appendChild(row);
+    });
+
+    const avgHr = (hrSum / history.length).toFixed(1);
+    const avgSpo2 = (spo2Sum / history.length).toFixed(1);
+
+    document.getElementById("countText").innerText = "有效记录数：" + history.length;
+    document.getElementById("avgHrText").innerText = "平均心率：" + avgHr + " bpm";
+    document.getElementById("avgSpo2Text").innerText = "平均血氧：" + avgSpo2 + " %";
+}
+
+function clearHistory() {
+    localStorage.removeItem("history");
+    loadHistory();
+}
+
+loadHistory();
+</script>
+
+</body>
+</html>
